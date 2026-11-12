@@ -4,7 +4,9 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import joblib
+import os
 from pathlib import Path
+from huggingface_hub import hf_hub_download
 
 # =========================================================
 # 1. PAGE CONFIGURATION
@@ -16,8 +18,8 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-PROJECT_PATH = Path(r"D:\next Gen In Ai\Final Project")
-MODEL_PATH = PROJECT_PATH / "Models" / "electricity_grid_model.pkl"
+HF_REPO_ID = "AhmedN3yazi/electricity-grid-model"
+HF_MODEL_FILENAME = "electricity_grid_model.pkl"
 
 # Professional dashboard styling
 st.markdown("""
@@ -93,16 +95,25 @@ CHART_CONFIG = {"displayModeBar": True, "displaylogo": False, "responsive": True
 # 2. LOAD THE SAVED MODEL BUNDLE
 # =========================================================
 @st.cache_resource
-def load_bundle(path_string):
-    return joblib.load(path_string)
+def load_bundle():
+    # The repository is private, so the token must be configured in Streamlit Secrets
+    # as HF_TOKEN. For local testing, an HF_TOKEN environment variable also works.
+    token = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
+    if not token:
+        raise RuntimeError(
+            "Hugging Face token is missing. Add HF_TOKEN to Streamlit Secrets."
+        )
 
-if not MODEL_PATH.exists():
-    st.error(f"Model bundle not found: {MODEL_PATH}")
-    st.info("Make sure electricity_grid_model.pkl exists inside the Models folder.")
-    st.stop()
+    model_path = hf_hub_download(
+        repo_id=HF_REPO_ID,
+        filename=HF_MODEL_FILENAME,
+        repo_type="model",
+        token=token,
+    )
+    return joblib.load(model_path)
 
 try:
-    bundle = load_bundle(str(MODEL_PATH))
+    bundle = load_bundle()
     model = bundle["model"]
     model_name = bundle["model_name"]
     features = bundle["features"]

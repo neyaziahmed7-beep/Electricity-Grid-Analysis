@@ -3,3 +3,5 @@ pandas
 numpy
 plotly
 scikit-learn
+huggingface_hub
+joblib
