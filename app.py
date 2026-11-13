@@ -90,37 +90,39 @@ st.markdown("""
 PLOT_TEMPLATE = "plotly_dark"
 CHART_CONFIG = {"displayModeBar": True, "displaylogo": False, "responsive": True}
 
+HF_REPO_ID = "AhmedN3yazi/electricity-grid-model"
+HF_MODEL_FILENAME = "dashboard_data.pkl"
 
 # =========================================================
 # 2. LOAD THE SAVED MODEL BUNDLE
 # =========================================================
 @st.cache_resource
 def load_bundle():
-    # The repository is private, so the token must be configured in Streamlit Secrets
-    # as HF_TOKEN. For local testing, an HF_TOKEN environment variable also works.
     token = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
+
     if not token:
         raise RuntimeError(
             "Hugging Face token is missing. Add HF_TOKEN to Streamlit Secrets."
         )
 
-    model_path = hf_hub_download(
+    data_path = hf_hub_download(
         repo_id=HF_REPO_ID,
         filename=HF_MODEL_FILENAME,
         repo_type="model",
         token=token,
     )
-    return joblib.load(model_path)
+
+    return joblib.load(data_path)
+
 
 try:
     bundle = load_bundle()
-    model = bundle["model"]
     model_name = bundle["model_name"]
-    features = bundle["features"]
     history = bundle["history"].copy()
     metrics = pd.DataFrame(bundle["metrics"])
+
 except Exception as error:
-    st.error(f"Could not load the model bundle: {error}")
+    st.error(f"Could not load dashboard data: {error}")
     st.stop()
 
 required_columns = {"Datetime", "Region", "Consumption"}
