@@ -92,6 +92,7 @@ CHART_CONFIG = {"displayModeBar": True, "displaylogo": False, "responsive": True
 
 HF_REPO_ID = "AhmedN3yazi/electricity-grid-model"
 HF_MODEL_FILENAME = "dashboard_data.pkl"
+HF_FORECAST_MODEL_FILENAME = "medium_extra_trees.joblib"
 
 # =========================================================
 # 2. LOAD THE SAVED MODEL BUNDLE
@@ -114,6 +115,23 @@ def load_bundle():
 
     return joblib.load(data_path)
 
+@st.cache_resource
+def load_forecast_model():
+    token = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
+
+    if not token:
+        raise RuntimeError(
+            "Hugging Face token is missing. Add HF_TOKEN to Streamlit Secrets."
+        )
+
+    model_path = hf_hub_download(
+        repo_id=HF_REPO_ID,
+        filename=HF_FORECAST_MODEL_FILENAME,
+        repo_type="model",
+        token=token,
+    )
+
+    return joblib.load(model_path)
 
 try:
     bundle = load_bundle()
@@ -176,6 +194,70 @@ def page_header(title, subtitle):
 
 def format_number(value):
     return f"{value:,.2f}" if pd.notna(value) else "N/A"
+
+
+def generate_recursive_forecast(model, region_history, region, horizon):
+    """
+    Generate recursive hourly electricity consumption forecasts.
+    """
+
+    data = (
+        region_history[region_history["Region"] == region]
+        .sort_values(["Datetime", "Occurrence"])
+        .copy()
+    )
+
+    if len(data) < 168:
+        raise ValueError(
+            f"Not enough historical observations for {region}."
+        )
+
+    consumption_history = data["Consumption"].astype(float).tolist()
+    last_datetime = data["Datetime"].iloc[-1]
+
+    forecast_rows = []
+    feature_columns = model.feature_names_in_.tolist()
+
+    for step in range(horizon):
+
+        next_datetime = last_datetime + pd.Timedelta(hours=step + 1)
+        values = np.array(consumption_history, dtype=float)
+
+        row = {
+            "Region": region,
+            "Occurrence": 1,
+            "Hour": next_datetime.hour,
+            "DayOfWeek": next_datetime.dayofweek,
+            "Day": next_datetime.day,
+            "Month": next_datetime.month,
+            "Quarter": next_datetime.quarter,
+            "DayOfYear": next_datetime.dayofyear,
+            "IsWeekend": int(next_datetime.dayofweek >= 5),
+            "Hour_Sin": np.sin(2 * np.pi * next_datetime.hour / 24),
+            "Hour_Cos": np.cos(2 * np.pi * next_datetime.hour / 24),
+            "Month_Sin": np.sin(2 * np.pi * next_datetime.month / 12),
+            "Month_Cos": np.cos(2 * np.pi * next_datetime.month / 12),
+            "Lag_1": values[-1],
+            "Lag_24": values[-24],
+            "Lag_168": values[-168],
+            "Rolling_Mean_24": pd.Series(values[-24:]).mean(),
+            "Rolling_Mean_168": pd.Series(values[-168:]).mean(),
+            "Rolling_Std_24": pd.Series(values[-24:]).std()
+        }
+
+        input_row = pd.DataFrame([row], columns=feature_columns)
+
+        prediction = float(model.predict(input_row)[0])
+
+        consumption_history.append(prediction)
+
+        forecast_rows.append({
+            "Datetime": next_datetime,
+            "Region": region,
+            "Predicted_Consumption": prediction
+        })
+
+    return pd.DataFrame(forecast_rows)
 
 
 # =========================================================
@@ -616,23 +698,26 @@ elif page == "Model Performance":
 # =========================================================
 # 9. FORECASTING WORKSPACE
 # =========================================================
+
 elif page == "Forecasting":
     page_header(
         "Electricity Demand Forecasting",
-        "Forecasting workspace — connect future feature generation to the saved trained pipeline."
+        "Recursive machine learning forecasts based on historical electricity consumption."
     )
 
-    st.info(
-        "The model uses historical lag and rolling features. "
-        "A valid multi-step forecast must generate these features recursively for each region."
+    st.info(  
+        "Forecasts are generated recursively: each prediction is used "
+        "to calculate the features for the following hour."
     )
 
     c1, c2 = st.columns(2)
+
     with c1:
         forecast_region = st.selectbox(
             "Choose a region",
             sorted(filtered["Region"].unique())
         )
+
     with c2:
         horizon = st.selectbox(
             "Forecast horizon",
@@ -643,24 +728,101 @@ elif page == "Forecasting":
     region_history = (
         history[history["Region"] == forecast_region]
         .sort_values(["Datetime", "Occurrence"])
+        .copy()
     )
 
-    st.metric("Selected Model", model_name)
-    st.metric("Available historical readings", f"{len(region_history):,}")
+    try:
+        with st.spinner("Loading forecasting model..."):
+            forecast_model = load_forecast_model()
 
-    st.markdown("#### Latest historical observations")
-    st.dataframe(
-        region_history[["Datetime", "Consumption"]].tail(15),
-        use_container_width=True,
-        hide_index=True
-    )
+        with st.spinner("Generating electricity demand forecast..."):
+            forecast = generate_recursive_forecast(
+                model=forecast_model,
+                region_history=history,
+                region=forecast_region,
+                horizon=horizon
+            )
 
-    st.warning(
-        "Forecast generation is intentionally not enabled yet. "
-        "Before producing forecasts, we must confirm the exact timestamp frequency, "
-        "Occurrence handling, and recursive lag/rolling feature logic used by the notebook. "
-        "This avoids displaying fabricated or incorrectly engineered predictions."
-    )
+        st.success("Forecast generated successfully.")
+
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric(
+            "Selected Model",
+            "Medium Extra Trees"
+        )
+
+        col2.metric(
+            "Forecast Horizon",
+            f"{horizon} hours"
+        )
+
+        col3.metric(
+            "Average Predicted Consumption",
+            f"{forecast['Predicted_Consumption'].mean():,.2f}"
+        )
+
+        st.markdown("#### Forecast Visualization")
+
+        fig = go.Figure()
+
+        historical = region_history.tail(168)
+
+        fig.add_trace(go.Scatter(
+            x=historical["Datetime"],
+            y=historical["Consumption"],
+            mode="lines",
+            name="Historical Consumption",
+            line=dict(width=2)
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=forecast["Datetime"],
+            y=forecast["Predicted_Consumption"],
+            mode="lines",
+            name="Predicted Consumption",
+            line=dict(width=3, dash="dash")
+        ))
+
+        fig.update_layout(
+            template=PLOT_TEMPLATE,
+            title=f"{forecast_region} - Historical vs Forecasted Consumption",
+            xaxis_title="Datetime",
+            yaxis_title="Electricity Consumption",
+            hovermode="x unified",
+            height=500
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config=CHART_CONFIG
+        )
+
+        st.markdown("#### Forecasted Values")
+
+        st.dataframe(
+            forecast,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.download_button(
+            "Download Forecast CSV",
+            data=forecast.to_csv(index=False).encode("utf-8"),
+            file_name=f"{forecast_region}_forecast_{horizon}h.csv",
+            mime="text/csv"
+        )
+
+        st.warning(
+            "Historical data ends at different dates for each region. "
+            "These forecasts extend from each region's last available "
+            "observation; they are not live forecasts for 2026."
+        )
+
+    except Exception as error:
+        st.error(f"Forecast generation failed: {error}")
+
 
 # =========================================================
 # 10. FOOTER
